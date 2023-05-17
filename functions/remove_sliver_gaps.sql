@@ -5,9 +5,13 @@ CREATE OR REPLACE FUNCTION dz_topo.remove_sliver_gaps(
    ,IN  p_slivertbl_owner  VARCHAR
    ,IN  p_slivertbl_name   VARCHAR
    ,IN  p_slivertbl_where  VARCHAR DEFAULT NULL
+   ,IN  p_generate_stats   BOOLEAN DEFAULT TRUE
 ) RETURNS TABLE(
     incoming_face_id         INTEGER
+   ,incoming_face_areasqkm   NUMERIC
+   ,incoming_face_minradius  NUMERIC
    ,target_topoid            INTEGER
+   ,common_length            NUMERIC
    ,orig_target_areasqkm     NUMERIC
    ,new_target_areasqkm      NUMERIC
    ,orig_target_mbr_areasqkm NUMERIC
@@ -28,6 +32,7 @@ DECLARE
    int_count         INTEGER;
    int_target        INTEGER;
    num_target_length NUMERIC;
+   orig_target       GEOMETRY;
    
 BEGIN
 
@@ -125,7 +130,7 @@ BEGIN
          edge_id
         ,other_face_id
         ,edge_length
-        .topogeo_id
+        ,topogeo_id
       )
       SELECT
        a.edge_id
@@ -134,21 +139,20 @@ BEGIN
       ,b.topogeo_id
       FROM (
          SELECT
-          a.edge_id
+          aa.edge_id
          ,CASE 
-          WHEN a.left_face = $1
+          WHEN aa.left_face = $1
           THEN
-            a.right_face
+            aa.right_face
           ELSE
-            a.left_face
+            aa.left_face
           END AS other_face_id
-         ,ST_LENGTH(a.geom) AS edge_length
-         ,b.topogeo_id
+         ,ST_LENGTH(aa.geom) AS edge_length
          FROM
-         ' || quote_ident(rec_topo.name) || '.edge a
+         ' || quote_ident(rec_topo.name) || '.edge aa
          WHERE
-            a.right_face = $2
-         OR a.left_face  = $3
+            aa.right_face = $2
+         OR aa.left_face  = $3
       ) a
       JOIN
       ' || quote_ident(rec_topo.name) || '.relation b 
@@ -179,23 +183,60 @@ BEGIN
       ORDER BY
       a.sum_edge_length DESC
       LIMIT 1;
-/*
+      
+      IF p_generate_stats
+      THEN
+         EXECUTE '
+         SELECT
+         ST_TRANSFORM(a.' || quote_ident(p_layer_column) || '::GEOMETRY,4326)
+         FROM
+         ' || quote_ident(p_layer_schema) || '.' || quote_ident(p_layer_table) || ' a
+         WHERE
+         (a.' || quote_ident(p_layer_column) || ').id = $1 '
+         INTO
+         orig_target
+         USING
+         rec.face_id;
+         
+         orig_target_areasqkm     := ST_AREA(orig_target::GEOGRAPHY)::NUMERIC / 1000000;
+         orig_target_minradiuskm  := ((SELECT radius FROM ST_MINIMUMBOUNDINGRADIUS(orig_target)) / 1000)::NUMERIC;
+         orig_target_mbr_areasqkm := ST_AREA(ST_ENVELOPE(orig_target)::GEOGRAPHY)::NUMERIC / 1000000;
+         
+      END IF;
+
       EXECUTE '
       UPDATE 
       ' || quote_ident(p_layer_schema) || '.' || quote_ident(p_layer_table) || ' a
       SET ' || quote_ident(p_layer_column) || ' = TopoGeom_addElement(' || quote_ident(p_layer_column) || ',$1)
       WHERE
-      a.' || quote_ident(p_layer_column) || '.id = $2 '
-      USING ARRAY[int_target,3]::topology.topoelement,rec.face_id;
-*/
+      (a.' || quote_ident(p_layer_column) || ').id = $2 '
+      USING ARRAY[rec.face_id,3]::topology.topoelement,int_target;
+
+      IF p_generate_stats
+      THEN
+         EXECUTE '
+         SELECT
+         ST_TRANSFORM(a.' || quote_ident(p_layer_column) || '::GEOMETRY,4326)
+         FROM
+         ' || quote_ident(p_layer_schema) || '.' || quote_ident(p_layer_table) || ' a
+         WHERE
+         (a.' || quote_ident(p_layer_column) || ').id = $1 '
+         INTO
+         orig_target
+         USING
+         rec.face_id;
+         
+         new_target_areasqkm     := ST_AREA(orig_target::GEOGRAPHY)::NUMERIC / 1000000;
+         new_target_minradiuskm  := ((SELECT radius FROM ST_MINIMUMBOUNDINGRADIUS(orig_target)) / 1000)::NUMERIC;
+         new_target_mbr_areasqkm := ST_AREA(ST_ENVELOPE(orig_target)::GEOGRAPHY)::NUMERIC / 1000000;
+         
+      END IF;
+      
       incoming_face_id         := rec.face_id;
+      incoming_face_areasqkm   := rec.areasqkm;
+      incoming_face_minradius  := rec.minradiuskm;
       target_topoid            := int_target;
-      orig_target_areasqkm     := NULL;
-      new_target_areasqkm      := NULL;
-      orig_target_mbr_areasqkm := NULL;
-      new_target_mbr_areasqkm  := NULL;
-      orig_target_minradiuskm  := NULL;
-      new_target_minradiuskm   := NULL;
+      common_length            := num_target_length;
       return_code              := 0;
       status_message           := NULL;
       RETURN NEXT;
@@ -215,4 +256,5 @@ GRANT EXECUTE ON FUNCTION dz_topo.remove_sliver_gaps(
    ,VARCHAR
    ,VARCHAR
    ,VARCHAR
+   ,BOOLEAN
 ) TO PUBLIC;
